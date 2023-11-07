@@ -3,11 +3,12 @@ package teldrive
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"path"
 	"sort"
-	"strings"
 	"sync"
 
 	"github.com/gofrs/uuid"
@@ -16,6 +17,28 @@ import (
 
 	"github.com/rclone/rclone/fs"
 )
+
+type BotWorkers struct {
+	sync.Mutex
+	bots  []string
+	index int
+}
+
+func (w *BotWorkers) Set(bots []string) {
+	w.Lock()
+	defer w.Unlock()
+	if len(w.bots) == 0 {
+		w.bots = bots
+	}
+}
+
+func (w *BotWorkers) Next() string {
+	w.Lock()
+	defer w.Unlock()
+	item := w.bots[w.index]
+	w.index = (w.index + 1) % len(w.bots)
+	return item
+}
 
 type uploadInfo struct {
 	existingChunks []api.PartFile
@@ -39,8 +62,7 @@ type objectChunkWriter struct {
 func (w *objectChunkWriter) WriteChunk(ctx context.Context, chunkNumber int, reader io.ReadSeeker) (size int64, err error) {
 
 	token := w.f.workers.Next()
-	client, _ := BotClient(w.f, token)
-	channelUser := strings.Split(token, ":")[0]
+
 	if chunkNumber < 0 {
 		err := fmt.Errorf("invalid chunk number provided: %v", chunkNumber)
 		return -1, err
@@ -81,46 +103,35 @@ func (w *objectChunkWriter) WriteChunk(ctx context.Context, chunkNumber int, rea
 			}
 		}
 
-		params := UploadParams{
-			Client:      client,
-			PartNo:      chunkNumber,
-			Name:        name,
-			Body:        reader,
-			Size:        size,
-			Token:       token,
-			ChannelUser: channelUser,
-			ChannelID:   w.f.opt.ChannelID,
-		}
-
-		msgId, err := UploadFile(ctx, params)
-
-		if err != nil {
-			fs.Debugf(w.o, "Error sending chunk %d (retry=%v): %v: %#v", chunkNumber, true, err, err)
-			return true, err
-		}
+		var res api.BotUploadResponse
 
 		opts := rest.Opts{
-			Method: "POST",
-			Path:   "/api/uploads/parts",
+			Method:  "POST",
+			RootURL: fmt.Sprintf("%s/bot%s/sendDocument", w.f.opt.BotApiUrl, token),
+			Body:    reader,
+			MultipartParams: url.Values{
+				"chat_id": []string{fmt.Sprintf("-100%d", w.f.opt.ChannelID)},
+			},
+			ContentLength:        &size,
+			MultipartContentName: "document",
+			MultipartFileName:    name,
 		}
-		payload := api.UploadPart{
-			Name:      name,
-			UploadId:  w.uploadID,
-			PartId:    msgId,
-			PartNo:    chunkNumber,
-			ChannelID: w.f.opt.ChannelID,
-			Size:      size,
-		}
-		w.f.pacer.Call(func() (bool, error) {
-			resp, err := w.f.srv.CallJSON(ctx, &opts, &payload, nil)
-			return shouldRetry(ctx, resp, err)
-		})
 
-		response.Name = name
-		response.PartId = msgId
-		response.PartNo = chunkNumber
-		response.Size = size
-		return false, nil
+		resp, err := w.f.srv.CallJSON(ctx, &opts, nil, &res)
+		retry, err := shouldRetry(ctx, resp, err)
+		if err != nil {
+			fs.Debugf(w.o, "Error sending chunk %d (retry=%v): %v: %#v", chunkNumber, retry, err, err)
+		}
+		if err == nil && res.OK && res.Result.MessageID > 0 {
+			response.Name = name
+			response.PartId = res.Result.MessageID
+			response.PartNo = chunkNumber
+			response.Size = size
+
+		} else {
+			return true, errors.New("upload failed")
+		}
+		return retry, err
 
 	})
 
@@ -173,12 +184,13 @@ func (w *objectChunkWriter) Close(ctx context.Context) error {
 	}
 
 	payload := api.CreateFileRequest{
-		Name:     w.f.opt.Enc.FromStandardName(leaf),
-		Type:     "file",
-		Path:     base,
-		MimeType: fs.MimeType(ctx, w.src),
-		Size:     w.src.Size(),
-		Parts:    fileParts,
+		Name:      w.f.opt.Enc.FromStandardName(leaf),
+		Type:      "file",
+		Path:      base,
+		MimeType:  fs.MimeType(ctx, w.src),
+		Size:      w.src.Size(),
+		Parts:     fileParts,
+		ChannelID: w.f.opt.ChannelID,
 	}
 
 	err := w.f.pacer.Call(func() (bool, error) {
@@ -209,7 +221,7 @@ func (*objectChunkWriter) Abort(ctx context.Context) error {
 
 func (fs *Fs) prepareUpload(ctx context.Context, src fs.ObjectInfo) (*uploadInfo, error) {
 
-	if len(fs.workers.bots) == 0 {
+	if fs.workers != nil && len(fs.workers.bots) == 0 {
 		var bots []string
 		opts := rest.Opts{
 			Method: "GET",
@@ -222,7 +234,7 @@ func (fs *Fs) prepareUpload(ctx context.Context, src fs.ObjectInfo) (*uploadInfo
 		if err != nil {
 			return nil, err
 		}
-		fs.workers.Set(bots)
+		fs.workers.Set(bots[:10])
 	}
 
 	base, leaf := fs.splitPathFull(src.Remote())

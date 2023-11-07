@@ -122,6 +122,7 @@ type CreateFileRequest struct {
 	Type      string     `json:"type"`
 	Path      string     `json:"path"`
 	MimeType  string     `json:"mimeType"`
+	ChannelID int64      `json:"channelId"`
 	Size      int64      `json:"size"`
 	Parts     []FilePart `json:"parts"`
 	CreatedAt string     `json:"createdAt,omitempty"`
@@ -177,4 +178,17 @@ type FileMeta struct {
 	Size      int64      `json:"size"`
 	Parts     []FilePart `json:"parts"`
 	ChannelID int64      `json:"channelId"`
+}
+
+type BotUploadResponse struct {
+	OK     bool `json:"ok"`
+	Result struct {
+		MessageID int `json:"message_id"`
+		Document  struct {
+			FileName string `json:"file_name"`
+			MimeType string `json:"mime_type"`
+			FileID   string `json:"file_id"`
+			FileSize int    `json:"file_size"`
+		} `json:"document"`
+	} `json:"result"`
 }

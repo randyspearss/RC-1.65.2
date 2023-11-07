@@ -27,7 +27,6 @@ import (
 	"github.com/rclone/rclone/fs/fshttp"
 	"github.com/rclone/rclone/fs/hash"
 	"github.com/rclone/rclone/lib/encoder"
-	"github.com/rclone/rclone/lib/kv"
 	"github.com/rclone/rclone/lib/pacer"
 	"github.com/rclone/rclone/lib/rest"
 )
@@ -57,18 +56,14 @@ func init() {
 			Name:      "api_host",
 			Sensitive: true,
 		}, {
-			Help:      "App Id",
-			Name:      "app_id",
-			Sensitive: true,
-		}, {
-			Help:      "App Hash",
-			Name:      "app_hash",
+			Help:      "Bot API URL",
+			Name:      "bot_api_url",
 			Sensitive: true,
 		}, {
 			Help:      "Channel Id",
 			Name:      "channel_id",
 			Sensitive: true,
-		},{
+		}, {
 			Help:    "Chunk Size",
 			Name:    "chunk_size",
 			Default: defaultChunkSize,
@@ -104,8 +99,7 @@ type Options struct {
 	ChunkSize         fs.SizeSuffix        `config:"chunk_size"`
 	RandomisePart     bool                 `config:"randomise_part"`
 	UploadConcurrency int                  `config:"upload_concurrency"`
-	AppId             int                  `config:"app_id"`
-	AppHash           string               `config:"app_hash"`
+	BotApiUrl         string               `config:"bot_api_url"`
 	ChannelID         int64                `config:"channel_id"`
 	Enc               encoder.MultiEncoder `config:"encoding"`
 }
@@ -120,7 +114,7 @@ type Fs struct {
 	pacer    *fs.Pacer
 	authHash string
 	workers  *BotWorkers
-	db       *kv.DB
+	
 }
 
 // Object represents an teldrive object
@@ -262,12 +256,9 @@ func NewFs(ctx context.Context, name string, root string, config configmap.Mappe
 	client := fshttp.NewClient(ctx)
 	authCookie := http.Cookie{Name: "user-session", Value: opt.AccessToken}
 	f.srv = rest.NewClient(client).SetRoot(opt.ApiHost).SetCookie(&authCookie)
-	f.workers = &BotWorkers{}
-	db, err := kv.Start(ctx, "session", f)
-	if err != nil {
-		return nil, err
+	if f.opt.BotApiUrl != "" {
+		f.workers = &BotWorkers{}
 	}
-	f.db = db
 	opts := rest.Opts{
 		Method: "GET",
 		Path:   "/api/auth/session",
