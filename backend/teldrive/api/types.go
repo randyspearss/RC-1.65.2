@@ -104,6 +104,15 @@ type PartFile struct {
 	Size       int64  `json:"size"`
 }
 
+type UploadPart struct {
+	Name      string `json:"name"`
+	UploadId  string `json:"uploadId"`
+	PartId    int    `json:"partId"`
+	PartNo    int    `json:"partNo"`
+	ChannelID int64  `json:"channelId"`
+	Size      int64  `json:"size"`
+}
+
 type FilePart struct {
 	ID int `json:"id"`
 }
@@ -160,6 +169,12 @@ type Token struct {
 }
 
 type Session struct {
-	UserName  string `json:"userName"`
-	Hash      string `json:"hash"`
+	UserName string `json:"userName"`
+	Hash     string `json:"hash"`
+}
+
+type FileMeta struct {
+	Size      int64      `json:"size"`
+	Parts     []FilePart `json:"parts"`
+	ChannelID int64      `json:"channelId"`
 }

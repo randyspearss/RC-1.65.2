@@ -26,7 +26,9 @@ import (
 	"github.com/rclone/rclone/fs/fserrors"
 	"github.com/rclone/rclone/fs/fshttp"
 	"github.com/rclone/rclone/fs/hash"
+	"github.com/rclone/rclone/lib/cache"
 	"github.com/rclone/rclone/lib/encoder"
+	"github.com/rclone/rclone/lib/kv"
 	"github.com/rclone/rclone/lib/pacer"
 	"github.com/rclone/rclone/lib/rest"
 )
@@ -56,6 +58,18 @@ func init() {
 			Name:      "api_host",
 			Sensitive: true,
 		}, {
+			Help:      "App Id",
+			Name:      "app_id",
+			Sensitive: true,
+		}, {
+			Help:      "App Hash",
+			Name:      "app_hash",
+			Sensitive: true,
+		}, {
+			Help:      "Channel Id",
+			Name:      "channel_id",
+			Sensitive: true,
+		},{
 			Help:    "Chunk Size",
 			Name:    "chunk_size",
 			Default: defaultChunkSize,
@@ -91,6 +105,9 @@ type Options struct {
 	ChunkSize         fs.SizeSuffix        `config:"chunk_size"`
 	RandomisePart     bool                 `config:"randomise_part"`
 	UploadConcurrency int                  `config:"upload_concurrency"`
+	AppId             int                  `config:"app_id"`
+	AppHash           string               `config:"app_hash"`
+	ChannelID         int64                `config:"channel_id"`
 	Enc               encoder.MultiEncoder `config:"encoding"`
 }
 
@@ -103,6 +120,9 @@ type Fs struct {
 	srv      *rest.Client
 	pacer    *fs.Pacer
 	authHash string
+	workers  *BotWorkers
+	db       *kv.DB
+	files    *cache.Cache
 }
 
 // Object represents an teldrive object
@@ -244,7 +264,14 @@ func NewFs(ctx context.Context, name string, root string, config configmap.Mappe
 	client := fshttp.NewClient(ctx)
 	authCookie := http.Cookie{Name: "user-session", Value: opt.AccessToken}
 	f.srv = rest.NewClient(client).SetRoot(opt.ApiHost).SetCookie(&authCookie)
-
+	f.workers = &BotWorkers{}
+	db, err := kv.Start(ctx, "session", f)
+	if err != nil {
+		return nil, err
+	}
+	f.db = db
+	f.files = cache.New()
+	f.files.SetExpireInterval(0)
 	opts := rest.Opts{
 		Method: "GET",
 		Path:   "/api/auth/session",
@@ -765,7 +792,7 @@ func (f *Fs) OpenChunkWriter(
 		fs:     f,
 		remote: remote,
 	}
-	ui, err := o.prepareUpload(ctx, src, options)
+	ui, err := f.prepareUpload(ctx, src)
 
 	if err != nil {
 		return info, nil, fmt.Errorf("failed to prepare upload: %w", err)
@@ -993,10 +1020,9 @@ func (o *Object) Remove(ctx context.Context) error {
 // Open an object for read
 func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.ReadCloser, err error) {
 	var resp *http.Response
-
-	http := o.fs.srv
-
+	
 	fs.FixRangeOption(options, o.size)
+
 	opts := rest.Opts{
 		Method:  "GET",
 		Path:    fmt.Sprintf("/api/files/%s/%s", o.id, url.QueryEscape(o.name)),
@@ -1007,13 +1033,14 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 	}
 
 	err = o.fs.pacer.Call(func() (bool, error) {
-		resp, err = http.Call(ctx, &opts)
+		resp, err = o.fs.srv.Call(ctx, &opts)
 		return shouldRetry(ctx, resp, err)
 	})
 
 	if err != nil {
 		return nil, err
 	}
+
 	return resp.Body, err
 }
 

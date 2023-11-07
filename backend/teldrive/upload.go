@@ -5,10 +5,9 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"net/url"
 	"path"
 	"sort"
-	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/gofrs/uuid"
@@ -38,6 +37,10 @@ type objectChunkWriter struct {
 
 // WriteChunk will write chunk number with reader bytes, where chunk number >= 0
 func (w *objectChunkWriter) WriteChunk(ctx context.Context, chunkNumber int, reader io.ReadSeeker) (size int64, err error) {
+
+	token := w.f.workers.Next()
+	client, _ := BotClient(w.f, token)
+	channelUser := strings.Split(token, ":")[0]
 	if chunkNumber < 0 {
 		err := fmt.Errorf("invalid chunk number provided: %v", chunkNumber)
 		return -1, err
@@ -78,23 +81,46 @@ func (w *objectChunkWriter) WriteChunk(ctx context.Context, chunkNumber int, rea
 			}
 		}
 
-		opts := rest.Opts{
-			Method:        "POST",
-			Path:          "/api/uploads/" + w.uploadID,
-			Body:          reader,
-			ContentLength: &size,
-			Parameters: url.Values{
-				"fileName": []string{name},
-				"partNo":   []string{strconv.Itoa(chunkNumber)},
-			},
+		params := UploadParams{
+			Client:      client,
+			PartNo:      chunkNumber,
+			Name:        name,
+			Body:        reader,
+			Size:        size,
+			Token:       token,
+			ChannelUser: channelUser,
+			ChannelID:   w.f.opt.ChannelID,
 		}
 
-		resp, err := w.f.srv.CallJSON(ctx, &opts, nil, &response)
-		retry, err := shouldRetry(ctx, resp, err)
+		msgId, err := UploadFile(ctx, params)
+
 		if err != nil {
-			fs.Debugf(w.o, "Error sending chunk %d (retry=%v): %v: %#v", chunkNumber, retry, err, err)
+			fs.Debugf(w.o, "Error sending chunk %d (retry=%v): %v: %#v", chunkNumber, true, err, err)
+			return true, err
 		}
-		return retry, err
+
+		opts := rest.Opts{
+			Method: "POST",
+			Path:   "/api/uploads/parts",
+		}
+		payload := api.UploadPart{
+			Name:      name,
+			UploadId:  w.uploadID,
+			PartId:    msgId,
+			PartNo:    chunkNumber,
+			ChannelID: w.f.opt.ChannelID,
+			Size:      size,
+		}
+		w.f.pacer.Call(func() (bool, error) {
+			resp, err := w.f.srv.CallJSON(ctx, &opts, &payload, nil)
+			return shouldRetry(ctx, resp, err)
+		})
+
+		response.Name = name
+		response.PartId = msgId
+		response.PartNo = chunkNumber
+		response.Size = size
+		return false, nil
 
 	})
 
@@ -181,8 +207,25 @@ func (*objectChunkWriter) Abort(ctx context.Context) error {
 	return nil
 }
 
-func (o *Object) prepareUpload(ctx context.Context, src fs.ObjectInfo, options []fs.OpenOption) (*uploadInfo, error) {
-	base, leaf := o.fs.splitPathFull(src.Remote())
+func (fs *Fs) prepareUpload(ctx context.Context, src fs.ObjectInfo) (*uploadInfo, error) {
+
+	if len(fs.workers.bots) == 0 {
+		var bots []string
+		opts := rest.Opts{
+			Method: "GET",
+			Path:   "/api/users/bots",
+		}
+		err := fs.pacer.Call(func() (bool, error) {
+			resp, err := fs.srv.CallJSON(ctx, &opts, nil, &bots)
+			return shouldRetry(ctx, resp, err)
+		})
+		if err != nil {
+			return nil, err
+		}
+		fs.workers.Set(bots)
+	}
+
+	base, leaf := fs.splitPathFull(src.Remote())
 
 	modTime := src.ModTime(ctx).UTC().Format(timeFormat)
 
@@ -194,8 +237,8 @@ func (o *Object) prepareUpload(ctx context.Context, src fs.ObjectInfo, options [
 		Path:   "/api/uploads/" + uploadID,
 	}
 
-	err := o.fs.pacer.Call(func() (bool, error) {
-		resp, err := o.fs.srv.CallJSON(ctx, &opts, nil, &uploadParts)
+	err := fs.pacer.Call(func() (bool, error) {
+		resp, err := fs.srv.CallJSON(ctx, &opts, nil, &uploadParts)
 		return shouldRetry(ctx, resp, err)
 	})
 
