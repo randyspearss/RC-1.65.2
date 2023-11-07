@@ -26,7 +26,6 @@ import (
 	"github.com/rclone/rclone/fs/fserrors"
 	"github.com/rclone/rclone/fs/fshttp"
 	"github.com/rclone/rclone/fs/hash"
-	"github.com/rclone/rclone/lib/cache"
 	"github.com/rclone/rclone/lib/encoder"
 	"github.com/rclone/rclone/lib/kv"
 	"github.com/rclone/rclone/lib/pacer"
@@ -122,7 +121,6 @@ type Fs struct {
 	authHash string
 	workers  *BotWorkers
 	db       *kv.DB
-	files    *cache.Cache
 }
 
 // Object represents an teldrive object
@@ -270,8 +268,6 @@ func NewFs(ctx context.Context, name string, root string, config configmap.Mappe
 		return nil, err
 	}
 	f.db = db
-	f.files = cache.New()
-	f.files.SetExpireInterval(0)
 	opts := rest.Opts{
 		Method: "GET",
 		Path:   "/api/auth/session",
