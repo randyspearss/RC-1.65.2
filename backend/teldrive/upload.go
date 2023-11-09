@@ -3,7 +3,6 @@ package teldrive
 import (
 	"context"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -128,8 +127,6 @@ func (w *objectChunkWriter) WriteChunk(ctx context.Context, chunkNumber int, rea
 			response.PartNo = chunkNumber
 			response.Size = size
 
-		} else {
-			return true, errors.New("upload failed")
 		}
 		return retry, err
 
