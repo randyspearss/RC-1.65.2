@@ -83,6 +83,7 @@ func (w *objectChunkWriter) WriteChunk(ctx context.Context, chunkNumber int, rea
 			partName = hex.EncodeToString(u1.Bytes())
 		} else {
 			
+			partName = fileName
 			if w.totalParts > 1 {
 				partName = fmt.Sprintf("%s.part.%03d", fileName, chunkNumber)
 			}
